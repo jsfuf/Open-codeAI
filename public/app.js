@@ -402,9 +402,10 @@ async function submitMessage() {
     ? Object.values(histSnap.val()).sort((a,b) => a.timestamp - b.timestamp)
     : [];
 
+  const recentMsgs = histMsgs.slice(-10).map(m => ({ role: m.role, content: m.content }));
   const apiMessages = [
     { role: 'system', content: buildSystemContext() },
-    ...histMsgs.map(m => ({ role: m.role, content: m.content }))
+    ...recentMsgs
   ];
 
   let aiGroup  = null;
@@ -647,7 +648,7 @@ function setupEventListeners() {
   document.getElementById('btnCloseSidebar').addEventListener('click', () => sidebar.classList.add('collapsed'));
   document.getElementById('btnOpenSidebar').addEventListener('click',  () => sidebar.classList.remove('collapsed'));
   document.addEventListener('click', e => {
-    if (!sidebar.classList.contains('collapsed') && !sidebar.contains(e.target) && e.target !== document.getElementById('btnOpenSidebar')) {
+    if (!sidebar.classList.contains('collapsed') && !sidebar.contains(e.target) && !e.target.closest('#btnOpenSidebar')) {
       sidebar.classList.add('collapsed');
     }
   });

@@ -125,8 +125,8 @@ module.exports = async function handler(req, res) {
         'Authorization': `Bearer ${apiKey}`,
         'Accept': 'text/event-stream'
       },
-      body: JSON.stringify({ model, messages: allMessages, max_tokens: 2048, temperature, top_p, stream: true }),
-      signal: AbortSignal.timeout(90000)
+      body: JSON.stringify({ model, messages: allMessages, max_tokens: 512, temperature, top_p, stream: true }),
+      signal: AbortSignal.timeout(60000)
     });
 
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
