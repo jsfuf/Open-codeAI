@@ -83,7 +83,9 @@ function classifyError(statusCode, body) {
   return { type: 'unknown', message: 'An unexpected error occurred. Please try again.' };
 }
 
-module.exports.config = { maxDuration: 120, regions: ['iad1'] };
+function parseJSON(str) {
+  try { return JSON.parse(str); } catch { return null; }
+}
 
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -93,7 +95,11 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.statusCode = 200; res.end(); return; }
   if (req.method !== 'POST') { res.statusCode = 405; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: 'Method not allowed' })); return; }
 
-  const { messages, temperature = 1.0, top_p = 0.95 } = req.body || {};
+  // Manually parse body — Vercel doesn't always auto-parse
+  let body = req.body;
+  if (!body || typeof body === 'string') { body = parseJSON(req.body) || {}; }
+
+  const { messages, temperature = 1.0, top_p = 0.95 } = body || {};
   if (!messages || !Array.isArray(messages)) { res.statusCode = 400; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: 'Messages array is required.' })); return; }
 
   const config = await getConfig();
@@ -163,3 +169,5 @@ module.exports = async function handler(req, res) {
     upstream.end();
   });
 };
+
+module.exports.config = { maxDuration: 60, regions: ['iad1'] };
