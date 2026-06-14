@@ -14,6 +14,7 @@ let conversations = {};     // { id: { title, messages:{} } }
 let activeChatId  = null;
 let pendingImage  = null;
 let generating    = false;
+let currentAbort  = null;   // AbortController for current request
 let convListener  = null;   // Firebase listener ref for cleanup
 
 // ─── Database Path Helpers (User Isolation) ───────────────────
@@ -39,6 +40,7 @@ const wlcGreeting    = document.getElementById('wlcGreeting');
 const messages       = document.getElementById('messages');
 const prompt         = document.getElementById('prompt');
 const btnSend        = document.getElementById('btnSend');
+const btnStop        = document.getElementById('btnStop');
 const fileImg        = document.getElementById('fileImg');
 const imgPreviewBar  = document.getElementById('imgPreviewBar');
 const imgThumb       = document.getElementById('imgThumb');
@@ -308,7 +310,7 @@ function renderMessage(role, content, animate = true) {
     const wrap   = document.createElement('div');
     wrap.className = 'msg-ai-wrap';
     const avatar = document.createElement('div');
-    avatar.className = 'ai-avatar'; avatar.textContent = 'M3';
+    avatar.className = 'ai-avatar'; avatar.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
     const bubble = document.createElement('div');
     bubble.className = 'msg-ai';
     if (content) {
@@ -332,7 +334,7 @@ function hlAll(el) {
 function addTyping() {
   const g = document.createElement('div');
   g.className = 'msg-group'; g.id = 'typingEl';
-  g.innerHTML = `<div class="msg-ai-wrap"><div class="ai-avatar">M3</div>
+  g.innerHTML = `<div class="msg-ai-wrap"><div class="ai-avatar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
     <div class="msg-ai"><div class="typing-dots"><span></span><span></span><span></span></div></div></div>`;
   messages.appendChild(g); scrollFeed();
 }
@@ -396,15 +398,33 @@ async function submitMessage() {
   let fullText = '';
 
   try {
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages:    apiMessages,
-        temperature: (userProfile.settings?.creativity ?? 1.0),
-        top_p:       0.95
-      })
-    });
+    currentAbort = new AbortController();
+    const timeoutId = setTimeout(() => {
+      if (currentAbort) { currentAbort.abort(); currentAbort = null; }
+    }, 120000);
+
+    let res;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages:    apiMessages,
+            temperature: (userProfile.settings?.creativity ?? 1.0),
+            top_p:       0.95
+          }),
+          signal: currentAbort ? currentAbort.signal : undefined
+        });
+        if (res.ok) break;
+      } catch (e) {
+        if (e.name === 'AbortError' || attempt === 1) throw e;
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      }
+    }
+
+    clearTimeout(timeoutId);
+    currentAbort = null;
 
     removeTyping();
 
@@ -423,6 +443,17 @@ async function submitMessage() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+
+      const throttleRender = () => {
+        if (aiBubble._rt) return;
+        aiBubble._rt = setTimeout(() => {
+          aiBubble._rt = null;
+          if (!fullText) return;
+          aiBubble.innerHTML = window.marked ? marked.parse(fullText) : esc(fullText);
+          hlAll(aiBubble);
+          scrollFeed();
+        }, 100);
+      };
 
       while (true) {
         const { done, value } = await reader.read();
@@ -447,12 +478,21 @@ async function submitMessage() {
             const delta = data.choices?.[0]?.delta?.content || '';
             if (delta) {
               fullText += delta;
-              aiBubble.innerHTML = window.marked ? marked.parse(fullText) : esc(fullText);
-              hlAll(aiBubble);
-              scrollFeed();
+              throttleRender();
             }
           } catch (_) {}
         }
+      }
+
+      // Final render after stream ends
+      if (aiBubble._rt) {
+        clearTimeout(aiBubble._rt);
+        aiBubble._rt = null;
+      }
+      if (fullText) {
+        aiBubble.innerHTML = window.marked ? marked.parse(fullText) : esc(fullText);
+        hlAll(aiBubble);
+        scrollFeed();
       }
     } else {
       // ── JSON fallback (non-streaming) ──
@@ -684,6 +724,12 @@ function setupEventListeners() {
     if (e.key === 'Enter' && !e.shiftKey && !generating) { e.preventDefault(); if (!btnSend.disabled) submitMessage(); }
   });
   btnSend.addEventListener('click', submitMessage);
+  btnStop.addEventListener('click', () => {
+    if (currentAbort) { currentAbort.abort(); currentAbort = null; }
+    generating = false;
+    removeTyping();
+    checkSend();
+  });
 
   // File upload
   fileImg.addEventListener('change', e => {
@@ -707,6 +753,7 @@ function resizePrompt() {
 }
 function checkSend() {
   btnSend.disabled = (!prompt.value.trim() && !pendingImage) || generating;
+  btnStop.style.display = generating ? '' : 'none';
 }
 function clearImage() {
   pendingImage = null; fileImg.value = '';

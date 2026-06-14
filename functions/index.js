@@ -1,9 +1,39 @@
-const { onCall, HttpsError, onRequest } = require("firebase-functions/v2/https");
+const { onRequest } = require("firebase-functions/v2/https");
+const admin = require("firebase-admin");
 const fetch = require("node-fetch");
 
-// Get API key from environment (set via .env file or firebase functions:config)
-const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY || "";
-const NVIDIA_INVOKE_URL = process.env.NVIDIA_INVOKE_URL || "https://integrate.api.nvidia.com/v1/chat/completions";
+admin.initializeApp();
+
+// Cache config so we don't read RTDB on every request
+let configCache = null;
+let configCacheTime = 0;
+const CACHE_TTL = 300000; // 5 minutes
+
+async function getConfig() {
+  const now = Date.now();
+  if (configCache && (now - configCacheTime) < CACHE_TTL) {
+    return configCache;
+  }
+  try {
+    const snap = await admin.database().ref("Opencode AI/config").once("value");
+    const data = snap.val();
+    if (data) {
+      configCache = data;
+      configCacheTime = now;
+      console.log("[Config] Loaded from Realtime Database");
+      return data;
+    }
+  } catch (e) {
+    console.warn("[Config] RTDB read failed, falling back to env:", e.message);
+  }
+  // Fallback to env vars (for local dev)
+  console.log("[Config] Using environment variables");
+  return {
+    nvidiaApiKey: process.env.NVIDIA_API_KEY || "",
+    invokeUrl: process.env.NVIDIA_INVOKE_URL || "https://integrate.api.nvidia.com/v1/chat/completions",
+    modelName: process.env.MODEL_NAME || "minimaxai/minimax-m3"
+  };
+}
 
 // Error classification helper
 function classifyError(statusCode, body) {
@@ -54,9 +84,10 @@ exports.chatStream = onRequest(
         return res.status(400).json({ error: "Messages array is required." });
       }
 
-      const apiKey = NVIDIA_API_KEY;
-      const invokeUrl = NVIDIA_INVOKE_URL;
-      const model = "minimaxai/minimax-m3";
+      const config = await getConfig();
+      const apiKey = config.nvidiaApiKey;
+      const invokeUrl = config.invokeUrl || "https://integrate.api.nvidia.com/v1/chat/completions";
+      const model = config.modelName || "minimaxai/minimax-m3";
 
       if (!apiKey) {
         console.error(`[${requestId}] NVIDIA_API_KEY not configured`);
@@ -65,9 +96,17 @@ exports.chatStream = onRequest(
 
       console.log(`[${requestId}] Starting streaming request to ${model}`);
 
+      // Prepend system prompt from Realtime Database
+      const dbSystemMsg = config.systemPrompt
+        ? { role: "system", content: config.systemPrompt }
+        : null;
+      const allMessages = dbSystemMsg
+        ? [dbSystemMsg, ...messages]
+        : messages;
+
       const payload = {
         model,
-        messages,
+        messages: allMessages,
         max_tokens: 8192,
         temperature,
         top_p,

@@ -218,10 +218,10 @@ body {
 .msg-ai-wrap { display: flex; gap: 12px; align-items: flex-start; }
 .ai-avatar {
   width: 30px; height: 30px; border-radius: 50%;
-  background: linear-gradient(135deg,#19c37d,#1565c0);
+  background: #000;
   flex-shrink: 0; margin-top: 2px;
   display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: .68rem; color: #fff; letter-spacing: .02em;
+  color: #fff;
 }
 
 .msg-ai { flex: 1; min-width: 0; font-size: .95rem; line-height: 1.65; color: var(--text); padding-top: 4px; }
@@ -297,10 +297,13 @@ body {
 #lblAttach { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 50%; cursor: pointer; color: var(--text-muted); transition: background .15s, color .15s; }
 #lblAttach:hover { background: var(--bg-hover); color: var(--text); }
 
-.send-btn { width: 34px; height: 34px; border-radius: 50%; background: #ececec; color: #212121; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, transform .1s; flex-shrink: 0; line-height: 0; }
+.send-btn,
+.stop-btn { width: 34px; height: 34px; border-radius: 50%; background: #ececec; color: #212121; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s, transform .1s; flex-shrink: 0; line-height: 0; }
 .send-btn:disabled { background: #424242; color: #666; cursor: not-allowed; }
 .send-btn:not(:disabled):hover { background: #c8c8c8; transform: scale(1.05); }
 .send-btn:not(:disabled):active { transform: scale(.95); }
+.stop-btn { background: #ef4444; color: #fff; }
+.stop-btn:hover { background: #dc2626; }
 
 .disclaimer { text-align: center; font-size: .72rem; color: var(--text-muted); margin-top: 8px; }
 

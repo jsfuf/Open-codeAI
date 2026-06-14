@@ -95,7 +95,7 @@ app.post('/api/chat', async (req, res) => {
 
     // Create abort controller for timeout handling
     const controller = new AbortController();
-    const timeoutMs = 60000; // 60 second timeout
+    const timeoutMs = 120000; // 120 second timeout
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     let upstream;
