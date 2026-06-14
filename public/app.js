@@ -470,7 +470,8 @@ async function submitMessage() {
         }, 100);
       };
 
-      while (true) {
+      let streamDone = false;
+      while (!streamDone) {
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -481,13 +482,15 @@ async function submitMessage() {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
           const dataStr = line.slice(6).trim();
-          if (dataStr === '[DONE]') break;
+          if (dataStr === '[DONE]') { streamDone = true; break; }
+          if (!dataStr) continue;
 
           try {
             const data = JSON.parse(dataStr);
             if (data.error) {
               fullText = `⚠️ ${esc(String(data.error))}`;
               aiBubble.innerHTML = fullText;
+              streamDone = true;
               break;
             }
             const delta = data.choices?.[0]?.delta?.content || '';
@@ -495,7 +498,9 @@ async function submitMessage() {
               fullText += delta;
               throttleRender();
             }
-          } catch (_) {}
+          } catch (e) {
+            console.warn('SSE parse error:', e, 'line:', dataStr);
+          }
         }
       }
 
@@ -548,7 +553,7 @@ async function submitMessage() {
 // ─── Network Error Message Helper ─────────────────────────────
 function getNetworkErrorMessage(err) {
   const msg = (err.message || '').toLowerCase();
-  if (msg.includes('failed to fetch') || msg.includes('networkerror')) {
+  if (msg.includes('failed to fetch') || msg.includes('networkerror') || msg.includes('typeerror')) {
     return 'Connection lost. Please check your internet connection.';
   }
   if (msg.includes('aborted') || msg.includes('timeout')) {
@@ -556,6 +561,9 @@ function getNetworkErrorMessage(err) {
   }
   if (msg.includes('refused') || msg.includes('unavailable')) {
     return 'The AI service is temporarily unavailable. Please try again.';
+  }
+  if (msg.includes('cors')) {
+    return 'Connection blocked by browser security. Please try again.';
   }
   return 'An unexpected error occurred. Please try again.';
 }
