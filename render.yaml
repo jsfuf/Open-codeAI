@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: ai-chat-api
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NVIDIA_API_KEY
+        sync: false  # Set in Render dashboard
+      - key: NVIDIA_INVOKE_URL
+        value: https://integrate.api.nvidia.com/v1/chat/completions
+      - key: MODEL_NAME
+        value: minimaxai/minimax-m3
+      - key: PORT
+        value: 10000
