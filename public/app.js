@@ -74,6 +74,16 @@ window.copyBlock = btn => {
     setTimeout(() => { btn.innerHTML = orig; }, 2000);
   });
 };
+window.copyMessage = btn => {
+  const msg = btn.closest('.msg-group').querySelector('.msg-ai');
+  if (!msg) return;
+  const text = msg.innerText || msg.textContent;
+  navigator.clipboard.writeText(text.trim()).then(() => {
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+    setTimeout(() => { btn.innerHTML = orig; }, 2000);
+  });
+};
 
 // ─── Auth State ───────────────────────────────────────────────
 onAuthStateChanged(auth, async user => {
@@ -317,8 +327,12 @@ function renderMessage(role, content, animate = true) {
       bubble.innerHTML = window.marked ? marked.parse(content) : esc(content);
       hlAll(bubble);
     }
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
+    actions.innerHTML = '<button class="msg-action-btn" onclick="copyMessage(this)" title="Copy response"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
     wrap.appendChild(avatar); wrap.appendChild(bubble);
     group.appendChild(wrap);
+    group.appendChild(actions);
     group._aiBubble = bubble;
   }
   messages.appendChild(group);
@@ -335,7 +349,7 @@ function addTyping() {
   const g = document.createElement('div');
   g.className = 'msg-group'; g.id = 'typingEl';
   g.innerHTML = `<div class="msg-ai-wrap"><div class="ai-avatar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
-    <div class="msg-ai"><div class="typing-dots"><span></span><span></span><span></span></div></div></div>`;
+    <div class="msg-ai"><div class="thinking-indicator"><span class="thinking-text">Thinking</span><div class="typing-dots"><span></span><span></span><span></span></div></div></div></div>`;
   messages.appendChild(g); scrollFeed();
 }
 function removeTyping() { document.getElementById('typingEl')?.remove(); }
@@ -632,6 +646,11 @@ function setupEventListeners() {
   // Sidebar toggles
   document.getElementById('btnCloseSidebar').addEventListener('click', () => sidebar.classList.add('collapsed'));
   document.getElementById('btnOpenSidebar').addEventListener('click',  () => sidebar.classList.remove('collapsed'));
+  document.addEventListener('click', e => {
+    if (!sidebar.classList.contains('collapsed') && !sidebar.contains(e.target) && e.target !== document.getElementById('btnOpenSidebar')) {
+      sidebar.classList.add('collapsed');
+    }
+  });
   document.getElementById('btnNewChat').addEventListener('click', startNewChat);
   document.getElementById('btnClearChat').addEventListener('click', startNewChat);
 
