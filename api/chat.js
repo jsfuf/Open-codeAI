@@ -83,10 +83,6 @@ function classifyError(statusCode, body) {
   return { type: 'unknown', message: 'An unexpected error occurred. Please try again.' };
 }
 
-function parseJSON(str) {
-  try { return JSON.parse(str); } catch { return null; }
-}
-
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -95,11 +91,15 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.statusCode = 200; res.end(); return; }
   if (req.method !== 'POST') { res.statusCode = 405; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: 'Method not allowed' })); return; }
 
-  // Manually parse body — Vercel doesn't always auto-parse
-  let body = req.body;
-  if (!body || typeof body === 'string') { body = parseJSON(req.body) || {}; }
-
-  const { messages, temperature = 1.0, top_p = 0.95 } = body || {};
+  // Read body — Vercel may or may not auto-parse it
+  let parsed;
+  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+    parsed = req.body;
+  } else {
+    const raw = typeof req.body === 'string' ? req.body : '';
+    try { parsed = JSON.parse(raw); } catch { parsed = {}; }
+  }
+  const { messages, temperature = 1.0, top_p = 0.95 } = parsed;
   if (!messages || !Array.isArray(messages)) { res.statusCode = 400; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: 'Messages array is required.' })); return; }
 
   const config = await getConfig();
@@ -117,57 +117,50 @@ module.exports = async function handler(req, res) {
     ? [dbSystemMsg, ...messages]
     : messages;
 
-  const bodyPayload = JSON.stringify({ model, messages: allMessages, max_tokens: 8192, temperature, top_p, stream: true });
+  try {
+    const upstreamRes = await fetch(invokeUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'Accept': 'text/event-stream'
+      },
+      body: JSON.stringify({ model, messages: allMessages, max_tokens: 8192, temperature, top_p, stream: true }),
+      signal: AbortSignal.timeout(120000)
+    });
 
-  return new Promise((resolve) => {
-    const url = new URL(invokeUrl);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    const opts = {
-      hostname: url.hostname, port: 443, path: url.pathname, method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'Accept': 'text/event-stream',
-        'Content-Length': Buffer.byteLength(bodyPayload)
-      }
-    };
-
-    const upstream = https.request(opts, (upRes) => {
-      if (upRes.statusCode !== 200) {
-        let e = '';
-        upRes.on('data', c => e += c);
-        upRes.on('end', () => {
-          const cls = classifyError(upRes.statusCode, e);
-          res.write(`data: ${JSON.stringify({ error: cls.message, errorType: cls.type })}\n\n`);
-          res.end(); resolve();
-        });
-        return;
-      }
-      upRes.on('data', c => res.write(c));
-      upRes.on('end', () => { res.write('data: [DONE]\n\n'); res.end(); resolve(); });
-      upRes.on('error', err => { res.write(`data: ${JSON.stringify({ error: 'Stream interrupted.', errorType: 'upstream_error' })}\n\n`); res.end(); resolve(); });
-    });
-
-    upstream.on('error', err => {
-      const cls = classifyError(0, err.message);
+    if (upstreamRes.status !== 200) {
+      const errBody = await upstreamRes.text();
+      const cls = classifyError(upstreamRes.status, errBody);
       res.write(`data: ${JSON.stringify({ error: cls.message, errorType: cls.type })}\n\n`);
-      res.end(); resolve();
-    });
+      res.end(); return;
+    }
 
-    upstream.setTimeout(60000, () => {
-      upstream.destroy();
-      res.write(`data: ${JSON.stringify({ error: 'Request timed out.', errorType: 'timeout' })}\n\n`);
-      res.end(); resolve();
-    });
-
-    upstream.write(bodyPayload);
-    upstream.end();
-  });
+    const reader = upstreamRes.body.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(decoder.decode(value));
+    }
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch (err) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    const cls = classifyError(0, err.message);
+    res.write(`data: ${JSON.stringify({ error: cls.message, errorType: cls.type })}\n\n`);
+    res.end();
+  }
 };
 
 module.exports.config = { maxDuration: 60, regions: ['iad1'] };
