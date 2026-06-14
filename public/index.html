@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MiniMax Chat</title>
+  <meta name="description" content="Personal AI assistant powered by NVIDIA MiniMax-M3.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Auth loading screen shown before Firebase state resolves -->
+<div id="initLoader" class="init-loader">
+  <div class="init-spinner"></div>
+</div>
+
+<div id="app" style="display:none">
+
+  <!-- ── SIDEBAR ─────────────────────────────────────────────── -->
+  <nav id="sidebar">
+    <div class="sb-top">
+      <button id="btnCloseSidebar" class="icon-btn" title="Close sidebar">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+      </button>
+      <button id="btnNewChat" class="icon-btn" title="New chat">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+
+    <div class="sb-section-label">Chats</div>
+    <div id="chatList" class="chat-list"></div>
+
+    <div class="sb-bottom">
+      <button id="btnUserProfile" class="sb-user-btn">
+        <img id="sbAvatar" class="sb-avatar" src="" alt="">
+        <div class="sb-user-info">
+          <span id="sbName" class="sb-user-name">Loading…</span>
+          <span id="sbEmail" class="sb-user-email"></span>
+        </div>
+      </button>
+      <div class="sb-actions">
+        <button id="btnSettings" class="icon-btn" title="Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33A1.65 1.65 0 0 0 14 21v.09a2 2 0 0 1-4 0V21a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button id="btnSignOut" class="icon-btn" title="Sign out">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── MAIN ─────────────────────────────────────────────────── -->
+  <div id="main">
+
+    <header id="topbar">
+      <button id="btnOpenSidebar" class="icon-btn" title="Open sidebar">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+      </button>
+      <div class="model-picker">
+        <span class="dot-green"></span>
+        MiniMax-M3
+      </div>
+      <button id="btnClearChat" class="icon-btn" title="New chat" style="margin-left:auto">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </header>
+
+    <section id="feed">
+      <!-- Welcome state -->
+      <div id="welcome">
+        <div class="wlc-greeting" id="wlcGreeting">Hello! 👋</div>
+        <h1>What can I help with?</h1>
+        <div class="suggestion-grid">
+          <button class="sugg-pill" data-text="Write a Python function to parse SSE streams from an HTTP response">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg> Code
+          </button>
+          <button class="sugg-pill" data-text="Explain how transformer attention mechanisms work in simple terms">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg> Explain
+          </button>
+          <button class="sugg-pill" data-text="Summarize the differences between REST and GraphQL APIs">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> Summarize
+          </button>
+          <button class="sugg-pill" data-text="Draft a product roadmap for a SaaS AI productivity app">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> Write
+          </button>
+        </div>
+      </div>
+
+      <div id="messages"></div>
+    </section>
+
+    <!-- ── INPUT ── ChatGPT pill ─────────────────────────────── -->
+    <div id="inputWrap">
+      <div id="composer">
+        <div id="imgPreviewBar" style="display:none">
+          <div class="img-thumb-wrap">
+            <img id="imgThumb" src="" alt="attachment">
+            <button id="btnRemoveImg" class="img-remove">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <textarea id="prompt" placeholder="Message MiniMax-M3" rows="1"></textarea>
+
+        <div class="composer-toolbar">
+          <div class="toolbar-left">
+            <label id="lblAttach" title="Attach image">
+              <input type="file" id="fileImg" accept="image/*" hidden>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </label>
+          </div>
+          <div class="toolbar-right">
+            <button id="btnSend" class="send-btn" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <p class="disclaimer">MiniMax-M3 can make mistakes. Verify important information.</p>
+    </div>
+
+  </div><!-- /main -->
+
+</div><!-- /app -->
+
+<!-- ── SETTINGS PANEL ──────────────────────────────────────── -->
+<div id="settingsPanel" class="side-panel" style="display:none">
+  <div class="panel-inner">
+    <div class="panel-head">
+      <h2>Settings</h2>
+      <button id="btnCloseSettings" class="icon-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+
+    <!-- Tabs -->
+    <div class="panel-tabs">
+      <button class="ptab active" data-tab="profile">Profile</button>
+      <button class="ptab" data-tab="ai">AI Prefs</button>
+      <button class="ptab" data-tab="memory">Memory</button>
+      <button class="ptab" data-tab="privacy">Privacy</button>
+    </div>
+
+    <!-- Profile Tab -->
+    <div id="tabProfile" class="panel-tab-content">
+      <div class="profile-avatar-row">
+        <img id="settingsAvatar" class="settings-avatar" src="" alt="">
+        <div>
+          <div id="settingsName" class="settings-user-name"></div>
+          <div id="settingsEmail" class="settings-user-email"></div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <label class="form-field"><span>Display Name</span><input id="fName" type="text" placeholder="Your name"></label>
+        <label class="form-field"><span>Date of Birth</span><input id="fDob" type="date"></label>
+        <label class="form-field"><span>Gender</span>
+          <select id="fGender">
+            <option value="">Prefer not to say</option>
+            <option value="male">Male</option>
+            <option value="female">Female</option>
+            <option value="non-binary">Non-binary</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+        <label class="form-field"><span>Occupation</span><input id="fOccupation" type="text" placeholder="Software Engineer…"></label>
+        <label class="form-field"><span>Location</span><input id="fLocation" type="text" placeholder="City, Country"></label>
+        <label class="form-field full"><span>Bio</span><textarea id="fBio" placeholder="Tell the AI a bit about yourself…" rows="3"></textarea></label>
+      </div>
+      <button id="btnSaveProfile" class="btn-primary">Save Profile</button>
+    </div>
+
+    <!-- AI Prefs Tab -->
+    <div id="tabAi" class="panel-tab-content" style="display:none">
+      <div class="form-grid">
+        <label class="form-field full"><span>Response Style</span>
+          <select id="fStyle">
+            <option value="balanced">Balanced</option>
+            <option value="concise">Concise</option>
+            <option value="detailed">Detailed</option>
+            <option value="friendly">Friendly</option>
+            <option value="professional">Professional</option>
+          </select>
+        </label>
+        <label class="form-field full"><span>Response Length</span>
+          <select id="fLength">
+            <option value="short">Short</option>
+            <option value="medium">Medium</option>
+            <option value="long">Long</option>
+          </select>
+        </label>
+        <label class="form-field full">
+          <span>Creativity (Temperature) — <b id="tempLabel">1.0</b></span>
+          <input type="range" id="fTemp" min="0" max="2" step="0.05" value="1.0">
+        </label>
+        <label class="form-field full"><span>Language</span>
+          <select id="fLang">
+            <option value="English">English</option>
+            <option value="French">French</option>
+            <option value="Spanish">Spanish</option>
+            <option value="German">German</option>
+            <option value="Arabic">Arabic</option>
+            <option value="Portuguese">Portuguese</option>
+            <option value="Chinese">Chinese</option>
+            <option value="Japanese">Japanese</option>
+          </select>
+        </label>
+      </div>
+      <button id="btnSaveAi" class="btn-primary">Save Preferences</button>
+    </div>
+
+    <!-- Memory Tab -->
+    <div id="tabMemory" class="panel-tab-content" style="display:none">
+      <p class="tab-desc">The AI saves things you tell it to remember. You can delete any memory below.</p>
+      <div id="memoryList" class="memory-list"></div>
+      <div id="memoryEmpty" class="memory-empty" style="display:none">No saved memories yet.</div>
+    </div>
+
+    <!-- Privacy Tab -->
+    <div id="tabPrivacy" class="panel-tab-content" style="display:none">
+      <div class="privacy-actions">
+        <div class="privacy-item">
+          <div>
+            <strong>Delete all chat history</strong>
+            <p>Permanently removes all your conversations from the database.</p>
+          </div>
+          <button id="btnDeleteChats" class="btn-danger">Delete</button>
+        </div>
+        <div class="privacy-item">
+          <div>
+            <strong>Delete all memories</strong>
+            <p>Clears everything the AI has been asked to remember about you.</p>
+          </div>
+          <button id="btnDeleteMemories" class="btn-danger">Delete</button>
+        </div>
+        <div class="privacy-item">
+          <div>
+            <strong>Export my data</strong>
+            <p>Download all your conversations and profile as a JSON file.</p>
+          </div>
+          <button id="btnExport" class="btn-secondary">Export</button>
+        </div>
+        <div class="privacy-item">
+          <div>
+            <strong>Sign out</strong>
+            <p>You will be redirected to the login page.</p>
+          </div>
+          <button id="btnSignOutSettings" class="btn-danger">Sign Out</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+<div id="panelBackdrop" class="panel-backdrop" style="display:none"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

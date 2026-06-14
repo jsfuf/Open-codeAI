@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in — MiniMax Chat</title>
+  <meta name="description" content="Sign in to your MiniMax AI assistant.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="auth.css">
+</head>
+<body>
+
+  <div class="auth-bg">
+    <!-- Subtle animated gradient orbs -->
+    <div class="orb orb1"></div>
+    <div class="orb orb2"></div>
+    <div class="orb orb3"></div>
+  </div>
+
+  <main class="auth-shell">
+
+    <!-- Logo -->
+    <div class="auth-logo">
+      <div class="logo-mark">
+        <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="8" fill="url(#grad)"/>
+          <path d="M10 16.5l4 4 8-9" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <defs>
+            <linearGradient id="grad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#19c37d"/>
+              <stop offset="100%" stop-color="#1565c0"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <span class="logo-name">MiniMax Chat</span>
+    </div>
+
+    <!-- Card -->
+    <div class="auth-card">
+      <h1>Welcome back</h1>
+      <p class="auth-sub">Sign in to continue to your AI assistant</p>
+
+      <!-- Error message -->
+      <div id="authError" class="auth-error" style="display:none"></div>
+
+      <!-- Google Sign-In -->
+      <button id="btnGoogle" class="btn-google">
+        <svg width="20" height="20" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+          <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+          <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+          <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+          <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+        </svg>
+        Continue with Google
+      </button>
+
+      <div class="auth-divider"><span>or</span></div>
+
+      <!-- Email hint (read-only, just for show like ChatGPT) -->
+      <div class="email-hint">
+        <p>Use your Google account to access all features including chat history, memory, and personalisation.</p>
+      </div>
+    </div>
+
+    <p class="auth-footer">
+      By signing in, you agree to our Terms of Service and Privacy Policy.
+    </p>
+
+  </main>
+
+  <!-- Loading overlay -->
+  <div id="authLoader" class="auth-loader" style="display:none">
+    <div class="spinner"></div>
+  </div>
+
+  <script type="module" src="auth.js"></script>
+</body>
+</html>
