@@ -69,7 +69,9 @@ const imgThumb       = document.getElementById('imgThumb');
 const btnRemoveImg   = document.getElementById('btnRemoveImg');
 const settingsPanel  = document.getElementById('settingsPanel');
 const panelBackdrop  = document.getElementById('panelBackdrop');
-const modelPicker    = document.getElementById('modelPicker');
+const modelSwitcherBtn = document.getElementById('modelSwitcher');
+const modelDropdown  = document.getElementById('modelDropdown');
+const modelSwitcherLabel = document.getElementById('modelSwitcherLabel');
 
 // ─── marked.js setup ──────────────────────────────────────────
 if (window.marked) {
@@ -217,7 +219,7 @@ async function bootstrapUser() {
     // Load saved model preference
     if (userProfile.settings?.selectedModel) {
       selectedModel = userProfile.settings.selectedModel;
-      if (modelPicker) modelPicker.value = selectedModel;
+      updateModelSwitcherUI();
     }
   } catch (e) {
     console.warn('[App] Failed to populate UI:', e);
@@ -1079,7 +1081,13 @@ function populateSettingsPanel() {
   const fLang = document.getElementById('fLang');
   if (fLang) fLang.value = s.language || 'English';
   const fModel = document.getElementById('fModel');
-  if (fModel) fModel.value = selectedModel;
+  if (fModel) {
+    fModel.value = selectedModel;
+    fModel.onchange = () => {
+      selectedModel = fModel.value;
+      updateModelSwitcherUI();
+    };
+  }
 
   refreshMemoryTab();
   updateSidebarUser();
@@ -1297,7 +1305,7 @@ function setupEventListeners() {
     await update(ref(db, settingsPath(uid)), settings);
     userProfile.settings = { ...(userProfile.settings || {}), ...settings };
     selectedModel = newModel;
-    if (modelPicker) modelPicker.value = selectedModel;
+    updateModelSwitcherUI();
     showMemoryToast('Preferences saved ✓');
   });
 
@@ -1363,19 +1371,64 @@ function setupEventListeners() {
     btn.addEventListener('click', () => { prompt.value = btn.dataset.text; resizePrompt(); checkSend(); prompt.focus(); });
   });
 
-  // Model picker
-  if (modelPicker) {
-    modelPicker.value = selectedModel;
-    modelPicker.addEventListener('change', async () => {
-      selectedModel = modelPicker.value;
-      if (currentUser) {
-        await update(ref(db, settingsPath(currentUser.uid)), { selectedModel });
+  // Model switcher dropdown
+  if (modelSwitcherBtn && modelDropdown) {
+    modelSwitcherBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isOpen = modelDropdown.style.display !== 'none';
+      modelDropdown.style.display = isOpen ? 'none' : 'block';
+      modelSwitcherBtn.classList.toggle('open', !isOpen);
+    });
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!modelDropdown.contains(e.target) && e.target !== modelSwitcherBtn) {
+        modelDropdown.style.display = 'none';
+        modelSwitcherBtn.classList.remove('open');
       }
     });
+
+    // Model item selection
+    modelDropdown.querySelectorAll('.model-dropdown-item').forEach(item => {
+      item.addEventListener('click', async () => {
+        const model = item.dataset.model;
+        selectedModel = model;
+        updateModelSwitcherUI();
+        modelDropdown.style.display = 'none';
+        modelSwitcherBtn.classList.remove('open');
+        // Also update settings panel select
+        const fModel = document.getElementById('fModel');
+        if (fModel) fModel.value = selectedModel;
+        // Save to Firebase
+        if (currentUser) {
+          await update(ref(db, settingsPath(currentUser.uid)), { selectedModel });
+        }
+      });
+    });
+
+    updateModelSwitcherUI();
   }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
+const MODEL_DISPLAY_NAMES = {
+  'deepseek-chat': 'DeepSeek Chat',
+  'deepseek-reasoner': 'DeepSeek Reasoner',
+  'gemini-2.5-flash': 'Gemini 2.5 Flash',
+  'gemini-2.5-flash-lite': 'Gemini 2.5 Flash Lite',
+};
+
+function updateModelSwitcherUI() {
+  if (modelSwitcherLabel) {
+    modelSwitcherLabel.textContent = MODEL_DISPLAY_NAMES[selectedModel] || selectedModel;
+  }
+  if (modelDropdown) {
+    modelDropdown.querySelectorAll('.model-dropdown-item').forEach(item => {
+      item.classList.toggle('active', item.dataset.model === selectedModel);
+    });
+  }
+}
+
 function resizePrompt() {
   prompt.style.height = 'auto';
   prompt.style.height = Math.min(prompt.scrollHeight, 200) + 'px';

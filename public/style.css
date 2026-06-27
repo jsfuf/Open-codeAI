@@ -162,7 +162,54 @@ body {
   display: flex; align-items: center; gap: 8px;
   font-size: .9rem; font-weight: 600; color: var(--text);
   padding: 5px 10px; border-radius: 8px; user-select: none;
+  position: relative;
 }
+.model-switcher-btn {
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+  color: var(--text); font-family: var(--font); font-size: .88rem; font-weight: 600;
+  padding: 6px 12px; border-radius: 10px; cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.model-switcher-btn:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.18); }
+.model-switcher-btn svg { opacity: .5; transition: transform .2s; }
+.model-switcher-btn.open svg { transform: rotate(180deg); }
+
+.model-dropdown {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 200;
+  min-width: 220px; background: rgba(24,24,28,0.97);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.1); border-radius: 14px;
+  padding: 6px; box-shadow: 0 8px 32px rgba(0,0,0,.55);
+  animation: dropIn .18s var(--ease);
+}
+@keyframes dropIn { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:translateY(0); } }
+
+.model-dropdown-label {
+  font-size: .7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--text-muted); padding: 8px 12px 4px;
+}
+.model-dropdown-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; background: none; border: none; color: var(--text);
+  font-family: var(--font); font-size: .85rem; font-weight: 500;
+  padding: 9px 12px; border-radius: 8px; cursor: pointer;
+  text-align: left; transition: background .12s;
+}
+.model-dropdown-item:hover { background: rgba(255,255,255,0.07); }
+.model-dropdown-item.active { background: rgba(25,195,125,0.12); color: var(--accent); }
+.model-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-muted); flex-shrink: 0;
+  transition: background .15s;
+}
+.model-dropdown-item.active .model-dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.model-badge {
+  margin-left: auto; font-size: .65rem; font-weight: 600;
+  color: var(--accent); background: rgba(25,195,125,0.12);
+  padding: 2px 8px; border-radius: 100px;
+}
+
 .model-select {
   background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 4px 8px; font-size: .85rem; font-weight: 500;
