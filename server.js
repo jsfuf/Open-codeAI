@@ -55,30 +55,30 @@ app.post('/api/chat', async (req, res) => {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   try {
-    const { messages, temperature = 1.0, top_p = 0.95 } = req.body;
+    const { messages, temperature = 2.0, top_p = 0.95 } = req.body;
 
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: 'Messages array is required.' });
     }
 
-    const apiKey     = process.env.NVIDIA_API_KEY;
-    const invokeUrl  = process.env.NVIDIA_INVOKE_URL;
-    const model      = process.env.MODEL_NAME || 'minimaxai/minimax-m3';
+    const apiKey     = process.env.GROQ_API_KEY;
+    const invokeUrl  = process.env.GROQ_API_URL;
+    const model      = process.env.MODEL_NAME || 'gpt-5-mini';
 
     if (!apiKey) {
-      console.error(`[${requestId}] NVIDIA_API_KEY missing on server.`);
+      console.error(`[${requestId}] GROQ_API_KEY missing on server.`);
       return res.status(500).json({ error: 'AI service configuration error.' });
     }
 
     if (!invokeUrl) {
-      console.error(`[${requestId}] NVIDIA_INVOKE_URL missing on server.`);
+      console.error(`[${requestId}] GROQ_API_URL missing on server.`);
       return res.status(500).json({ error: 'AI service endpoint not configured.' });
     }
 
     const payload = {
       model,
       messages,
-      max_tokens: 8192,
+      max_tokens: 4096,
       temperature,
       top_p,
       stream: true
@@ -256,6 +256,338 @@ app.post('/api/chat', async (req, res) => {
       res.write(`data: ${JSON.stringify({ error: classified.message, errorType: classified.type })}\n\n`);
       res.end();
     }
+  }
+});
+
+// ─── DeepSeek AI Proxy — Streaming ─────────────────────────────
+app.post('/api/deepseek-chat', async (req, res) => {
+  const startTime = Date.now();
+  const requestId = `ds_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    const { messages, model, temperature = 0.7, max_tokens = 4096 } = req.body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Messages array are required.' });
+    }
+
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+      console.error(`[${requestId}] DEEPSEEK_API_KEY missing on server.`);
+      return res.status(500).json({ error: 'DeepSeek AI service not configured.' });
+    }
+
+    const modelId = model || 'deepseek-chat';
+    const url = 'https://api.deepseek.com/chat/completions';
+
+    const payload = {
+      model: modelId,
+      messages,
+      max_tokens,
+      temperature,
+      stream: true,
+    };
+
+    console.log(`[${requestId}] DeepSeek AI request: ${modelId}`);
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+    let upstream;
+    try {
+      upstream = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'Accept': 'text/event-stream',
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      const classified = classifyNetworkError(fetchErr);
+      console.error(`[${requestId}] Network error:`, fetchErr.message);
+      res.write(`data: ${JSON.stringify({ error: classified.message, errorType: classified.type })}\n\n`);
+      return res.end();
+    }
+
+    clearTimeout(timeoutId);
+
+    if (!upstream.ok) {
+      const errText = await upstream.text();
+      const classified = classifyError(upstream.status, errText);
+      console.error(`[${requestId}] DeepSeek API error ${upstream.status}: ${errText.slice(0, 500)}`);
+      res.write(`data: ${JSON.stringify({ error: classified.message, errorType: classified.type })}\n\n`);
+      return res.end();
+    }
+
+    if (!upstream.body) {
+      console.error(`[${requestId}] No body in upstream response.`);
+      res.write(`data: ${JSON.stringify({ error: 'DeepSeek AI returned an empty response.', errorType: 'empty' })}\n\n`);
+      return res.end();
+    }
+
+    let chunkCount = 0;
+    let firstChunkTime = null;
+
+    const pipe = async () => {
+      if (typeof upstream.body.getReader === 'function') {
+        const reader = upstream.body.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunkCount++;
+            if (!firstChunkTime) firstChunkTime = Date.now();
+            res.write(value);
+          }
+          const elapsed = Date.now() - startTime;
+          console.log(`[${requestId}] Stream complete. Chunks: ${chunkCount}, Time: ${elapsed}ms`);
+        } catch (readErr) {
+          console.error(`[${requestId}] Reader error:`, readErr.message);
+          res.write(`data: ${JSON.stringify({ error: 'Stream interrupted.', errorType: 'stream_error' })}\n\n`);
+        } finally {
+          reader.releaseLock();
+          res.end();
+        }
+      } else if (upstream.body.on) {
+        upstream.body.on('data', chunk => {
+          chunkCount++;
+          if (!firstChunkTime) firstChunkTime = Date.now();
+          res.write(chunk);
+        });
+        upstream.body.on('end', () => {
+          const elapsed = Date.now() - startTime;
+          console.log(`[${requestId}] Stream complete. Chunks: ${chunkCount}, Time: ${elapsed}ms`);
+          res.end();
+        });
+        upstream.body.on('error', err => {
+          console.error(`[${requestId}] Upstream stream error:`, err.message);
+          res.write(`data: ${JSON.stringify({ error: 'Stream interrupted.', errorType: 'stream_error' })}\n\n`);
+          res.end();
+        });
+      } else {
+        res.write(`data: ${JSON.stringify({ error: 'Unsupported response format.', errorType: 'format' })}\n\n`);
+        res.end();
+      }
+    };
+
+    await pipe();
+  } catch (err) {
+    const elapsed = Date.now() - startTime;
+    console.error(`[${requestId}] Server error after ${elapsed}ms:`, err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error.' });
+    } else {
+      const classified = classifyNetworkError(err);
+      res.write(`data: ${JSON.stringify({ error: classified.message, errorType: classified.type })}\n\n`);
+      res.end();
+    }
+  }
+});
+
+// ─── Gemini AI Proxy — Streaming ──────────────────────────────
+app.post('/api/gemini-chat', async (req, res) => {
+  const startTime = Date.now();
+  const requestId = `gm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    const { messages, model, temperature = 2.0, maxOutputTokens = 8192 } = req.body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Messages array is required.' });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.error(`[${requestId}] GEMINI_API_KEY missing.`);
+      return res.status(500).json({ error: 'Gemini service not configured.' });
+    }
+
+    const modelId = model || 'gemini-2.5-flash';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+
+    // Convert messages to Gemini format
+    const systemMsg = messages.find(m => m.role === 'system');
+    const geminiMessages = messages
+      .filter(m => m.role !== 'system')
+      .map(m => ({
+        role: m.role === 'assistant' ? 'model' : m.role,
+        parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }],
+      }));
+
+    const payload = {
+      contents: geminiMessages,
+      generationConfig: {
+        temperature,
+        topP: 0.95,
+        maxOutputTokens,
+      },
+    };
+
+    if (systemMsg && systemMsg.content && systemMsg.content.length > 10) {
+      payload.systemInstruction = { parts: [{ text: systemMsg.content }] };
+    }
+
+    console.log(`[${requestId}] Gemini request: ${modelId}`);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+    let rawRes;
+    try {
+      rawRes = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      const classified = classifyNetworkError(fetchErr);
+      console.error(`[${requestId}] Network error:`, fetchErr.message);
+      return res.status(500).json({ error: classified.message });
+    }
+
+    clearTimeout(timeoutId);
+
+    if (!rawRes.ok) {
+      const errText = await rawRes.text();
+      console.error(`[${requestId}] Gemini API error ${rawRes.status}: ${errText.slice(0, 500)}`);
+      const classified = classifyError(rawRes.status, errText);
+      return res.status(rawRes.status).json({ error: classified.message });
+    }
+
+    const data = await rawRes.json();
+    let fullText = '';
+    for (const candidate of (data.candidates || [])) {
+      for (const part of (candidate.content?.parts || [])) {
+        if (part.text) fullText += part.text;
+      }
+    }
+
+    if (!fullText) fullText = 'No response received. Please try again.';
+
+    // Stream it back as SSE for compatibility with the frontend
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const chunkSize = 20;
+    let idx = 0;
+    const sendChunk = () => {
+      if (idx < fullText.length) {
+        const chunk = fullText.slice(idx, idx + chunkSize);
+        idx += chunkSize;
+        const sseData = JSON.stringify({ choices: [{ delta: { content: chunk } }] });
+        res.write(`data: ${sseData}\n\n`);
+        setTimeout(sendChunk, 10);
+      } else {
+        res.write('data: [DONE]\n\n');
+        const elapsed = Date.now() - startTime;
+        console.log(`[${requestId}] Gemini response complete. Length: ${fullText.length}, Time: ${elapsed}ms`);
+        res.end();
+      }
+    };
+    sendChunk();
+  } catch (err) {
+    const elapsed = Date.now() - startTime;
+    console.error(`[${requestId}] Server error after ${elapsed}ms:`, err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error.' });
+    } else {
+      res.write(`data: ${JSON.stringify({ error: 'Server error.', errorType: 'server' })}\n\n`);
+      res.end();
+    }
+  }
+});
+
+// ─── Gemini Image Generation Proxy ────────────────────────────
+app.post('/api/gemini-image', async (req, res) => {
+  const startTime = Date.now();
+  const requestId = `gi_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  try {
+    const { messages, model } = req.body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Messages array is required.' });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.error(`[${requestId}] GEMINI_API_KEY missing.`);
+      return res.status(500).json({ error: 'Gemini service not configured.' });
+    }
+
+    const modelId = model || 'gemini-2.5-flash-image';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+
+    const geminiMessages = messages
+      .filter(m => m.role !== 'system')
+      .map(m => ({
+        role: m.role === 'assistant' ? 'model' : m.role,
+        parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }],
+      }));
+
+    const systemMsg = messages.find(m => m.role === 'system');
+
+    const payload = {
+      contents: geminiMessages,
+      generationConfig: {
+        temperature: 2.0,
+        responseModalities: ['TEXT', 'IMAGE'],
+      },
+    };
+
+    if (systemMsg && systemMsg.content) {
+      payload.systemInstruction = { parts: [{ text: systemMsg.content }] };
+    }
+
+    console.log(`[${requestId}] Gemini image request: ${modelId}`);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
+
+    let rawRes;
+    try {
+      rawRes = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      console.error(`[${requestId}] Network error:`, fetchErr.message);
+      return res.status(500).json({ error: 'Network error.' });
+    }
+
+    clearTimeout(timeoutId);
+
+    if (!rawRes.ok) {
+      const errText = await rawRes.text();
+      console.error(`[${requestId}] Gemini image API error ${rawRes.status}: ${errText.slice(0, 500)}`);
+      return res.status(rawRes.status).json({ error: `Gemini API error (${rawRes.status})` });
+    }
+
+    const data = await rawRes.json();
+    const elapsed = Date.now() - startTime;
+    console.log(`[${requestId}] Gemini image response complete. Time: ${elapsed}ms`);
+    res.json(data);
+  } catch (err) {
+    const elapsed = Date.now() - startTime;
+    console.error(`[${requestId}] Server error after ${elapsed}ms:`, err);
+    res.status(500).json({ error: 'Internal server error.' });
   }
 });
 

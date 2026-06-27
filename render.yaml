@@ -7,11 +7,15 @@ services:
     buildCommand: npm install
     startCommand: node server.js
     envVars:
-      - key: NVIDIA_API_KEY
+      - key: GROQ_API_KEY
         sync: false  # Set in Render dashboard
-      - key: NVIDIA_INVOKE_URL
-        value: https://integrate.api.nvidia.com/v1/chat/completions
+      - key: GROQ_API_URL
+        value: https://opencode.ai/zen/v1/chat/completions
       - key: MODEL_NAME
-        value: minimaxai/minimax-m3
+        value: mimo-v2.5-free
+      - key: DEEPSEEK_API_KEY
+        sync: false  # Set in Render dashboard
+      - key: GEMINI_API_KEY
+        sync: false  # Set in Render dashboard
       - key: PORT
         value: 10000

@@ -1,10 +1,29 @@
-import { auth, db, googleProvider } from './firebase.js';
+import { auth, db, googleProvider } from './firebase.js?v=3';
 import {
   onAuthStateChanged, signOut
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   ref, get, set, push, update, remove, onValue, off
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+const API_CONFIG = {
+  'gemini-2.5-flash': {
+    provider: 'gemini',
+    model: 'gemini-2.5-flash',
+  },
+  'gemini-2.5-flash-lite': {
+    provider: 'gemini',
+    model: 'gemini-2.5-flash-lite',
+  },
+};
+
+const IMAGE_MODELS = [
+  'gemini-2.5-flash-image',
+  'gemini-3-pro-image',
+  'gemini-3.1-flash-image',
+];
+
+const IMAGE_KEYWORDS = /generat|creat|draw|image|picture|photo|illustrat|design|make.*image|make.*photo|make.*picture|render|sketch|paint|artwork/i;
 
 // ─── State ────────────────────────────────────────────────────
 let currentUser   = null;
@@ -16,11 +35,14 @@ let pendingImage  = null;
 let generating    = false;
 let currentAbort  = null;   // AbortController for current request
 let convListener  = null;   // Firebase listener ref for cleanup
+let userProfileListener = null;  // Real-time profile listener
+let selectedModel = 'deepseek-chat';  // Default DeepSeek model
 
 // ─── Database Path Helpers (User Isolation) ───────────────────
 // All data is scoped to the authenticated user's UID
 function userPath(uid)        { return `users/${uid}`; }
 function memoryPath(uid)      { return `users/${uid}/memory`; }
+function savedPicPath(uid)    { return `users/${uid}/savedPic`; }
 function chatDbPath(uid)      { return `users/${uid}/chatDatabase`; }
 function chatPath(uid, chatId){ return `users/${uid}/chatDatabase/${chatId}`; }
 function msgsPath(uid, chatId){ return `users/${uid}/chatDatabase/${chatId}/messages`; }
@@ -47,6 +69,7 @@ const imgThumb       = document.getElementById('imgThumb');
 const btnRemoveImg   = document.getElementById('btnRemoveImg');
 const settingsPanel  = document.getElementById('settingsPanel');
 const panelBackdrop  = document.getElementById('panelBackdrop');
+const modelPicker    = document.getElementById('modelPicker');
 
 // ─── marked.js setup ──────────────────────────────────────────
 if (window.marked) {
@@ -55,12 +78,18 @@ if (window.marked) {
     renderer: (() => {
       const r = new marked.Renderer();
       r.code = ({ text, lang }) => {
-        const l = lang || 'plaintext';
+        const l = lang || 'text';
         const e = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        return `<div class="code-block"><div class="code-block-head"><span>${l}</span>
-          <button class="code-copy-btn" onclick="copyBlock(this)">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            Copy</button></div><pre><code class="language-${l} hljs">${e}</code></pre></div>`;
+        return `<div class="code-block">
+          <div class="code-block-head">
+            <span>${l}</span>
+            <button class="code-copy-btn" onclick="copyBlock(this)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy code
+            </button>
+          </div>
+          <pre><code class="language-${l} hljs">${e}</code></pre>
+        </div>`;
       };
       return r;
     })()
@@ -70,8 +99,12 @@ window.copyBlock = btn => {
   const code = btn.closest('.code-block').querySelector('code');
   navigator.clipboard.writeText(code.innerText).then(() => {
     const orig = btn.innerHTML;
-    btn.textContent = 'Copied!';
-    setTimeout(() => { btn.innerHTML = orig; }, 2000);
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Copied!';
+    btn.style.color = '#10a37f';
+    setTimeout(() => {
+      btn.innerHTML = orig;
+      btn.style.color = '';
+    }, 2000);
   });
 };
 window.copyMessage = btn => {
@@ -86,13 +119,26 @@ window.copyMessage = btn => {
 };
 
 // ─── Auth State ───────────────────────────────────────────────
+setTimeout(() => {
+  if (initLoader && initLoader.style.display !== 'none') {
+    console.warn('[App] Timeout: force-showing app');
+    initLoader.style.display = 'none';
+    appEl.style.display = 'flex';
+  }
+}, 6000);
+
 onAuthStateChanged(auth, async user => {
   if (!user) {
     window.location.replace('/auth.html');
     return;
   }
   currentUser = user;
-  await bootstrapUser();
+
+  try {
+    await bootstrapUser();
+  } catch (e) {
+    console.error('[App] Bootstrap error:', e);
+  }
   initLoader.style.display = 'none';
   appEl.style.display = 'flex';
 });
@@ -101,43 +147,102 @@ onAuthStateChanged(auth, async user => {
 async function bootstrapUser() {
   const uid = currentUser.uid;
 
-  // Load ONLY this user's profile
-  const profileSnap = await get(ref(db, userPath(uid)));
-  if (profileSnap.exists()) {
-    userProfile = profileSnap.val();
+  // Run GETs concurrently to speed up loading
+  try {
+    const [profileSnap, memSnap] = await Promise.all([
+      get(ref(db, userPath(uid))).catch(e => { console.warn('[App] Failed to load profile:', e); return null; }),
+      get(ref(db, memoryPath(uid))).catch(e => { console.warn('[App] Failed to load memories:', e); return null; })
+    ]);
+
+    if (profileSnap && profileSnap.exists()) {
+      userProfile = profileSnap.val();
+    }
+
+    // Fallback: try loading profile pic from savedPic if not in user data
+    if (!userProfile.photoURL) {
+      try {
+        const picSnap = await get(ref(db, `users/${uid}/savedPic/profilePic`));
+        if (picSnap.exists() && picSnap.val().url) {
+          userProfile.photoURL = picSnap.val().url;
+        }
+      } catch (_) {}
+    }
+    
+    if (memSnap && memSnap.exists()) {
+      userMemories = memSnap.val();
+    } else {
+      userMemories = {};
+    }
+  } catch (e) {
+    console.warn('[App] Failed to load user data concurrently:', e);
   }
 
-  // Ensure avatar/name updated from Google
-  await update(ref(db, userPath(uid)), {
-    email:       currentUser.email,
-    displayName: currentUser.displayName || userProfile.displayName || '',
-    photoURL:    currentUser.photoURL    || userProfile.photoURL    || ''
-  });
+  // Update memory state with the current Google info immediately for UI
+  // IMPORTANT: database photoURL takes priority over Google auth photoURL
+  // to persist uploaded profile pictures across page reloads
   userProfile.email       = currentUser.email;
   userProfile.displayName = currentUser.displayName || userProfile.displayName || '';
-  userProfile.photoURL    = currentUser.photoURL    || '';
+  userProfile.photoURL    = userProfile.photoURL    || currentUser.photoURL    || '';
 
-  // Load ONLY this user's memories
-  const memSnap = await get(ref(db, memoryPath(uid)));
-  userMemories = memSnap.exists() ? memSnap.val() : {};
+  // Non-blocking background update (do not await)
+  update(ref(db, userPath(uid)), {
+    email:       userProfile.email,
+    displayName: userProfile.displayName,
+    photoURL:    userProfile.photoURL
+  }).catch(e => console.warn('[App] Failed to update user data:', e));
+
+  // Real-time listener for profile changes (e.g. profile picture update)
+  if (userProfileListener) off(ref(db, userPath(uid)), 'value', userProfileListener);
+  const userRef = ref(db, userPath(uid));
+  userProfileListener = onValue(userRef, (snap) => {
+    if (snap.exists()) {
+      const data = snap.val();
+      if (data.photoURL && data.photoURL !== userProfile.photoURL) {
+        userProfile.photoURL = data.photoURL;
+        updateSidebarUser();
+        console.log('[App] Profile picture updated via listener');
+      }
+      userProfile.displayName = data.displayName || userProfile.displayName;
+      userProfile.email = data.email || userProfile.email;
+    }
+  });
 
   // Populate UI
-  updateSidebarUser();
-  setGreeting();
-  setupConvListener();
-  setupEventListeners();
-  populateSettingsPanel();
+  try {
+    updateSidebarUser();
+    setGreeting();
+    setupConvListener();
+    setupEventListeners();
+    populateSettingsPanel();
+    // Load saved model preference
+    if (userProfile.settings?.selectedModel) {
+      selectedModel = userProfile.settings.selectedModel;
+      if (modelPicker) modelPicker.value = selectedModel;
+    }
+  } catch (e) {
+    console.warn('[App] Failed to populate UI:', e);
+  }
 }
 
 function updateSidebarUser() {
-  sbAvatar.src = userProfile.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(userProfile.displayName||'U')}&background=19c37d&color=fff&size=64`;
+  const fallback = `https://ui-avatars.com/api/?name=${encodeURIComponent(userProfile.displayName||'U')}&background=19c37d&color=fff&size=64`;
+  const avatarUrl = userProfile.photoURL || fallback;
+
+  // Use onerror fallback for broken images
+  const onErrorHandler = function() {
+    this.onerror = null;
+    this.src = fallback;
+  };
+
+  sbAvatar.onerror = onErrorHandler;
+  sbAvatar.src = avatarUrl;
   sbName.textContent  = userProfile.displayName || 'User';
   sbEmail.textContent = userProfile.email || '';
 
   const sa = document.getElementById('settingsAvatar');
   const sn = document.getElementById('settingsName');
   const se = document.getElementById('settingsEmail');
-  if (sa) sa.src = sbAvatar.src;
+  if (sa) { sa.onerror = onErrorHandler; sa.src = avatarUrl; }
   if (sn) sn.textContent = userProfile.displayName || '';
   if (se) se.textContent = userProfile.email || '';
 }
@@ -175,11 +280,17 @@ function renderSidebar() {
     const el = document.createElement('div');
     el.className = 'chat-item' + (id === activeChatId ? ' active' : '');
     el.innerHTML = `<span class="ci-title">${esc(chat.title || 'Untitled')}</span>
-      <button class="ci-del" title="Delete">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
-      </button>`;
+      <div class="ci-actions">
+        <button class="ci-edit" title="Rename">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+        </button>
+        <button class="ci-del" title="Delete">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+        </button>
+      </div>`;
     el.querySelector('.ci-title').addEventListener('click', () => loadChat(id));
     el.querySelector('.ci-del').addEventListener('click', e => { e.stopPropagation(); deleteChat(id); });
+    el.querySelector('.ci-edit').addEventListener('click', e => { e.stopPropagation(); renameChat(id, el, chat.title); });
     chatList.appendChild(el);
   });
 }
@@ -219,29 +330,118 @@ async function deleteChat(id) {
   if (activeChatId === id) startNewChat();
 }
 
+function renameChat(id, el, currentTitle) {
+  const titleEl = el.querySelector('.ci-title');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = currentTitle || '';
+  input.className = 'ci-rename-input';
+  input.style.cssText = 'flex:1;background:var(--bg-card);border:1px solid var(--accent);border-radius:4px;color:var(--text);font-size:.875rem;padding:2px 6px;outline:none;font-family:var(--font);';
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const save = async () => {
+    const newTitle = input.value.trim() || 'Untitled';
+    const uid = currentUser.uid;
+    await update(ref(db, chatPath(uid, id)), { title: newTitle });
+    conversations[id].title = newTitle;
+    renderSidebar();
+  };
+
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { input.value = currentTitle || ''; input.blur(); }
+  });
+}
+
 // ─── Memory Engine (User-Scoped) ──────────────────────────────
 const MEMORY_PATTERNS = [
-  /(?:remember|recall|save|note|keep in mind|don't forget)[:\s]+(.+)/i,
-  /(?:my name is|i'm called|call me)\s+([A-Za-z ]+)/i,
-  /(?:i am|i'm|i work as|i'm a|i'm an)\s+(.+)/i,
-  /(?:i prefer|i like|i love|i enjoy)\s+(.+)/i,
-  /(?:i live in|i'm from|i'm based in)\s+(.+)/i,
+  // Explicit save commands
+  /(?:remember|recall|save|note|keep in mind|don't forget|write down|store)[:\s]+(.+)/i,
+  // Name
+  /(?:my name is|i'm called|call me|i go by)\s+([A-Za-z ]+)/i,
+  // Identity
+  /(?:i am|i'm|i work as|i'm a|i'm an|i work as a|i'm a)\s+(.+)/i,
+  // Preferences
+  /(?:i prefer|i like|i love|i enjoy|i adore|i'm into)\s+(.+)/i,
+  /(?:i hate|i dislike|i don't like|i can't stand|i hate)\s+(.+)/i,
+  // Location
+  /(?:i live in|i'm from|i'm based in|i reside in|i live at)\s+(.+)/i,
+  // Birthday
+  /(?:i was born on|i was born in|i was born|i'm born on)\s+(.+)/i,
+  /(?:my birthday is|my birthday's on|born on|my bday)\s+(.+)/i,
+  // Languages
+  /(?:i speak|i know languages?|my first language is|i speak)\s+(.+)/i,
+  // Education
+  /(?:i'm learning|i'm studying|i study|i'm taking|i go to)\s+(.+)/i,
+  // Work
+  /(?:i work at|i work for|my company is|i'm employed at|i work at)\s+(.+)/i,
+  // Hobbies
+  /(?:my hobby is|i hobby in|in my free time i|i spend my time|i like to)\s+(.+)/i,
+  // Relationship
+  /(?:i'm married|i'm single|i'm divorced|i have a partner|i'm dating)\s+(.+)/i,
+  // Family
+  /(?:i have kids?|i have children|my son|my daughter|my child|my wife|my husband|my partner)\s+(.+)/i,
+  // Favorites
+  /(?:my favorite|favourite|best|top|fave)\s+(?:color|colour|food|movie|book|song|music|team|sport|place|city|country|animal|game|show|tv show|band|artist)\s+(?:is|are)\s+(.+)/i,
+  // Pets
+  /(?:i have a|my|i own)\s+(dog|cat|pet|bird|fish|hamster|rabbit|turtle|horse|puppy|kitten)\s+(.+)/i,
+  // Health
+  /(?:i'm allergic to|i can't eat|i have an allergy|i'm intolerant)\s+(.+)/i,
+  /(?:i suffer from|i have|i've been diagnosed with|i have a condition)\s+(.+)/i,
+  // Goals
+  /(?:my goal|i want to|i plan to|i'm planning to|i aim to|i hope to|i wish to|i dream of)\s+(.+)/i,
+  // Beliefs
+  /(?:i believe|i think|i feel|i'm passionate about|i care about|i value)\s+(.+)/i,
+  // Age
+  /(?:i am|i'm)\s+(\d{1,3})\s+(?:years? old|yo)/i,
+  // Job title
+  /(?:i work as a|i'm a|i'm an|i'm currently a|i'm working as)\s+(.+)/i,
+  // Food preferences
+  /(?:i'm vegetarian|i'm vegan|i'm gluten free|i don't eat|i only eat|i'm on a)\s+(.+)/i,
 ];
 
 async function detectAndSaveMemory(text) {
   const uid = currentUser.uid;
+  const lower = text.toLowerCase();
+
+  // Check for explicit save commands first
+  const explicitSave = /(?:remember|recall|save|note|keep in mind|don't forget|write down|store|save this|save that)[:\s]*(.+)/i;
+  const explicitMatch = text.match(explicitSave);
+
+  if (explicitMatch) {
+    const memText = explicitMatch[1]?.trim() || text;
+    if (memText && memText.length > 3) {
+      const memRef = push(ref(db, memoryPath(uid)));
+      const entry = { text: memText, savedAt: Date.now(), source: 'explicit' };
+      await set(memRef, entry);
+      userMemories[memRef.key] = entry;
+      refreshMemoryTab();
+      showMemoryToast('Saved to memory');
+      return true;
+    }
+  }
+
+  // Check for personal info patterns
   for (const pattern of MEMORY_PATTERNS) {
     const match = text.match(pattern);
     if (match) {
-      const memText = text.length < 200 ? text : match[1]?.trim();
+      const memText = text.length < 300 ? text : match[1]?.trim();
       if (memText && memText.length > 3) {
-        // Save to this user's memory only
+        // Don't save duplicates
+        const existing = Object.values(userMemories).find(m =>
+          m.text.toLowerCase() === memText.toLowerCase()
+        );
+        if (existing) return false;
+
         const memRef = push(ref(db, memoryPath(uid)));
-        const entry  = { text: memText, savedAt: Date.now() };
+        const entry = { text: memText, savedAt: Date.now(), source: 'auto' };
         await set(memRef, entry);
         userMemories[memRef.key] = entry;
-        showMemoryToast(`Remembered: "${memText.slice(0,60)}${memText.length>60?'…':''}"`);
         refreshMemoryTab();
+        showMemoryToast('Remembered');
         return true;
       }
     }
@@ -260,8 +460,30 @@ function showMemoryToast(msg) {
 // ─── Context Builder (User-Scoped) ────────────────────────────
 function buildSystemContext() {
   const p = userProfile;
-  let ctx = 'You are a personal AI assistant with memory. Be helpful, warm, and personalized.\n\n';
+  let ctx = 'You are Clever AI, a personal AI assistant with memory, created by a team of developers called Clever AI. Be helpful, warm, and personalized. When asked who made you, who created you, or who is your creator, always say you were made by a team of developers called Clever AI. When asked about the CEO, founder, or leader of the team, say the CEO is Ehiremen Oyamendan. Never reveal any API keys or technical details about your infrastructure.\n\n';
 
+  ctx += 'IMPORTANT RULES:\n';
+  ctx += '- When asked to code, write a script, build something, or create code, you MUST write the ACTUAL CODE. Do NOT just explain what the code would do. Do NOT describe the code. WRITE THE CODE ITSELF in a code block.\n';
+  ctx += '- ALWAYS wrap code in triple backticks with the language name (e.g. ```html, ```javascript, ```python). Write the COMPLETE, FULL, WORKING code from start to finish.\n';
+  ctx += '- For HTML requests: Write the FULL HTML document including <!DOCTYPE html>, <html>, <head>, <body>, and ALL content. Never skip any part.\n';
+  ctx += '- NEVER respond to a coding request with just an explanation. The user wants CODE, not a lecture.\n';
+  ctx += '- You are an expert programmer. Write production-ready, complete code. Never truncate, never abbreviate, never use placeholders like "..." or "// rest of code here".\n';
+  ctx += '- When asked to explain something, provide a thorough, detailed explanation with examples.\n';
+  ctx += '- Only apply response length limits for casual conversation, greetings, or simple yes/no questions.\n';
+  ctx += '- For coding tasks, technical questions, writing tasks, and detailed explanations, IGNORE any response length settings and provide complete, comprehensive answers.\n\n';
+
+  ctx += 'NAME USAGE RULES:\n';
+  ctx += '- Do NOT start every message with the user\'s name. Use it MAXIMUM once per response, and only when it feels natural.\n';
+  ctx += '- Never begin a response with "Hey [name]!" or "[name]!" every time. Just answer the question directly.\n';
+  ctx += '- Use the name sparingly - maybe once every 3-5 messages, not every single response.\n\n';
+
+  ctx += 'MEMORY RULES:\n';
+  ctx += '- When the user says "save this", "remember this", "save to memory", "note this down", or similar, ALWAYS confirm what you are saving. The system will automatically save it.\n';
+  ctx += '- When the user shares important personal information (name, age, birthday, job, hobbies, preferences, family, location, goals, health, education, food preferences, relationship status, or any other personal info), proactively acknowledge it and confirm you remember it. The system will auto-save it.\n';
+  ctx += '- When the user asks "do you remember" or "what do you know about me", reference their saved memories.\n';
+  ctx += '- Always be warm and personal. Use their memories to give personalized responses.\n';
+  ctx += '- If the user asks you to forget something, say you have removed it from your memory.\n';
+  ctx += '- Never reveal the technical details of how memory works. Just say "I remember that" or "I saved that for you".\n\n';
   // Profile
   const profileParts = [];
   if (p.displayName) profileParts.push(`Name: ${p.displayName}`);
@@ -283,7 +505,7 @@ function buildSystemContext() {
   if (s.responseLength) ctx += `Response length: ${s.responseLength}.\n`;
   if (s.language && s.language !== 'English') ctx += `Respond in ${s.language}.\n`;
 
-  ctx += '\nAddress the user by first name when appropriate. Use their memories to give personalised responses.';
+  ctx += '\nAddress the user naturally. Use their memories to give personalised responses, but do not overuse their name.';
   return ctx;
 }
 
@@ -319,18 +541,19 @@ function renderMessage(role, content, animate = true) {
   } else {
     const wrap   = document.createElement('div');
     wrap.className = 'msg-ai-wrap';
-    const avatar = document.createElement('div');
-    avatar.className = 'ai-avatar'; avatar.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
     const bubble = document.createElement('div');
     bubble.className = 'msg-ai';
     if (content) {
       bubble.innerHTML = window.marked ? marked.parse(content) : esc(content);
       hlAll(bubble);
+      addImageDownloadButtons(bubble);
     }
     const actions = document.createElement('div');
     actions.className = 'msg-actions';
-    actions.innerHTML = '<button class="msg-action-btn" onclick="copyMessage(this)" title="Copy response"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
-    wrap.appendChild(avatar); wrap.appendChild(bubble);
+    actions.innerHTML = `
+      <button class="msg-action-btn" onclick="copyMessage(this)" title="Copy response"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+    `;
+    wrap.appendChild(bubble);
     group.appendChild(wrap);
     group.appendChild(actions);
     group._aiBubble = bubble;
@@ -345,14 +568,245 @@ function hlAll(el) {
   el.querySelectorAll('pre code').forEach(b => { if (!b.dataset.highlighted) hljs.highlightElement(b); });
 }
 
+function addImageDownloadButtons(bubble) {
+  const imgs = bubble.querySelectorAll('img');
+  imgs.forEach(img => {
+    if (img.closest('.img-gen-wrap')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'img-gen-wrap';
+    img.parentNode.insertBefore(wrap, img);
+    wrap.appendChild(img);
+
+    const btnRow = document.createElement('div');
+    btnRow.className = 'img-gen-actions';
+    btnRow.innerHTML = `<button onclick="downloadGeneratedImage(this)" title="Download image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download</button>`;
+    wrap.appendChild(btnRow);
+  });
+}
+
+window.downloadGeneratedImage = function(btn) {
+  const img = btn.closest('.img-gen-wrap').querySelector('img');
+  if (!img) return;
+  const a = document.createElement('a');
+  a.href = img.src;
+  a.download = `clever-ai-image-${Date.now()}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
+
 function addTyping() {
   const g = document.createElement('div');
   g.className = 'msg-group'; g.id = 'typingEl';
-  g.innerHTML = `<div class="msg-ai-wrap"><div class="ai-avatar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
-    <div class="msg-ai"><div class="thinking-indicator"><span class="thinking-text">Thinking</span><div class="typing-dots"><span></span><span></span><span></span></div></div></div></div>`;
+  g.innerHTML = `<div class="msg-ai-wrap"><div class="msg-ai"><div class="thinking-indicator"><div class="thinking-dots"><span></span><span></span><span></span></div></div></div></div>`;
   messages.appendChild(g); scrollFeed();
 }
 function removeTyping() { document.getElementById('typingEl')?.remove(); }
+
+// ─── Direct API Call Helpers ─────────────────────────────────
+async function callOpenCodeZen(cfg, messages, signal) {
+  const payload = {
+    model: cfg.model,
+    messages,
+    max_tokens: 4096,
+    temperature: 2.0,
+    top_p: 0.95,
+    stream: true,
+  };
+  return fetch(cfg.url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${cfg.apiKey}`,
+      'Accept': 'text/event-stream',
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+async function callDeepSeek(modelId, messages, signal) {
+  const payload = {
+    model: modelId,
+    messages,
+    max_tokens: 4096,
+    temperature: 0.7,
+  };
+  return fetch('/api/deepseek-chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+async function callGeminiDirect(cfg, messages, signal) {
+  const payload = {
+    model: cfg.model,
+    messages,
+    temperature: 2.0,
+    maxOutputTokens: 8192,
+  };
+
+  console.log('[Gemini] Requesting via proxy:', cfg.model, 'messages:', messages.length);
+
+  const maxRetries = 3;
+  const retryDelays = [5000, 10000, 20000];
+  let rawRes;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    rawRes = await fetch('/api/gemini-chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal,
+    });
+
+    console.log('[Gemini] Response status:', rawRes.status, 'attempt:', attempt + 1);
+
+    if (rawRes.status === 429 && attempt < maxRetries) {
+      const delay = retryDelays[attempt];
+      console.log('[Gemini] Rate limited, retrying in', delay / 1000, 's...');
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+
+    break;
+  }
+
+  if (!rawRes.ok) {
+    const errText = await rawRes.text().catch(() => 'Unknown error');
+    console.error('[Gemini] API error:', rawRes.status, errText.slice(0, 300));
+
+    const errStream = new ReadableStream({
+      start(controller) {
+        const msg = rawRes.status === 429
+          ? 'Rate limited. Retrying...'
+          : `AI error (${rawRes.status}). Please try again.`;
+        const data = JSON.stringify({ choices: [{ delta: { content: `⚠️ ${msg}` } }] });
+        controller.enqueue(new TextEncoder().encode(`data: ${data}\n\ndata: [DONE]\n\n`));
+        controller.close();
+      }
+    });
+    return new Response(errStream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  }
+
+  // Server proxy already returns SSE in OpenAI-compatible format
+  return rawRes;
+}
+
+async function callGeminiImageWithFallback(messages, signal) {
+  for (const modelName of IMAGE_MODELS) {
+    console.log(`[ImageGen] Trying model: ${modelName}`);
+
+    try {
+      let rawRes;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        rawRes = await fetch('/api/gemini-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: modelName,
+            messages,
+          }),
+          signal,
+        });
+        if (rawRes.status === 429 && attempt < 2) {
+          console.log(`[ImageGen] Rate limited, retrying in ${(attempt + 1) * 5}s...`);
+          await new Promise(r => setTimeout(r, (attempt + 1) * 5000));
+          continue;
+        }
+        break;
+      }
+
+      if (!rawRes.ok) {
+        const errText = await rawRes.text().catch(() => '');
+        console.warn(`[ImageGen] ${modelName} failed with status ${rawRes.status}:`, errText.slice(0, 200));
+        continue;
+      }
+
+      const data = await rawRes.json();
+      const parts = data.candidates?.[0]?.content?.parts || [];
+
+      let textContent = '';
+      const images = [];
+
+      for (const part of parts) {
+        if (part.text) {
+          textContent += part.text;
+        } else if (part.inlineData) {
+          images.push({
+            mimeType: part.inlineData.mimeType,
+            data: part.inlineData.data,
+          });
+        }
+      }
+
+      if (images.length > 0) {
+        const uid = currentUser?.uid;
+        if (uid) {
+          for (const img of images) {
+            const imgUrl = `data:${img.mimeType};base64,${img.data}`;
+            const picRef = push(ref(db, savedPicPath(uid)));
+            await set(picRef, {
+              url: imgUrl,
+              prompt: messages.find(m => m.role === 'user')?.content || '',
+              model: modelName,
+              createdAt: Date.now(),
+              type: 'generated',
+            });
+          }
+          console.log(`[ImageGen] Saved ${images.length} image(s) to savedPic`);
+        }
+      }
+
+      let sseContent = textContent || '';
+      if (images.length > 0) {
+        for (const img of images) {
+          const imgUrl = `data:${img.mimeType};base64,${img.data}`;
+          sseContent += `\n\n![Generated image](${imgUrl})`;
+        }
+      }
+
+      if (!sseContent) {
+        sseContent = 'No image was generated. Please try a different prompt.';
+      }
+
+      const sseData = JSON.stringify({ choices: [{ delta: { content: sseContent } }] });
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: ${sseData}\n\ndata: [DONE]\n\n`));
+          controller.close();
+        }
+      });
+
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+      });
+    } catch (err) {
+      console.warn(`[ImageGen] ${modelName} error:`, err.message);
+      continue;
+    }
+  }
+
+  const errData = JSON.stringify({ choices: [{ delta: { content: '⚠️ Image generation is rate-limited. Please wait about 30 seconds and try again. The free tier has limited image generation requests.' } }] });
+  const errStream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${errData}\n\ndata: [DONE]\n\n`));
+      controller.close();
+    }
+  });
+  return new Response(errStream, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+  });
+}
 
 // ─── Send Message (User-Scoped with Error Handling) ───────────
 async function submitMessage() {
@@ -402,7 +856,7 @@ async function submitMessage() {
     ? Object.values(histSnap.val()).sort((a,b) => a.timestamp - b.timestamp)
     : [];
 
-  const recentMsgs = histMsgs.slice(-10).map(m => ({ role: m.role, content: m.content }));
+  const recentMsgs = histMsgs.slice(-6).map(m => ({ role: m.role, content: m.content }));
   const apiMessages = [
     { role: 'system', content: buildSystemContext() },
     ...recentMsgs
@@ -418,19 +872,28 @@ async function submitMessage() {
       if (currentAbort) { currentAbort.abort(); currentAbort = null; }
     }, 120000);
 
+    const userText = text || '';
+    const isImageRequest = IMAGE_KEYWORDS.test(userText);
+    const isDeepSeekModel = selectedModel.startsWith('deepseek-');
+    const isGeminiModel = selectedModel.startsWith('gemini-');
+    const cfg = isGeminiModel ? API_CONFIG[selectedModel] : null;
+
+    if (isGeminiModel && !cfg) {
+      throw new Error('Unknown model: ' + selectedModel);
+    }
+
     let res;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            messages:    apiMessages,
-            temperature: (userProfile.settings?.creativity ?? 1.0),
-            top_p:       0.95
-          }),
-          signal: currentAbort ? currentAbort.signal : undefined
-        });
+        if (isImageRequest && !isDeepSeekModel) {
+          res = await callGeminiImageWithFallback(apiMessages, currentAbort ? currentAbort.signal : undefined);
+        } else if (isDeepSeekModel) {
+          res = await callDeepSeek(selectedModel, apiMessages, currentAbort ? currentAbort.signal : undefined);
+        } else if (isGeminiModel) {
+          res = await callGeminiDirect(cfg, apiMessages, currentAbort ? currentAbort.signal : undefined);
+        } else {
+          res = await callOpenCodeZen(cfg, apiMessages, currentAbort ? currentAbort.signal : undefined);
+        }
         if (res.ok) break;
       } catch (e) {
         if (e.name === 'AbortError' || attempt === 1) throw e;
@@ -444,6 +907,8 @@ async function submitMessage() {
     removeTyping();
 
     if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.error('API error:', res.status, errText.slice(0, 500));
       renderMessage('assistant', '⚠️ The AI service is temporarily unavailable. Please try again.');
       generating = false; checkSend(); return;
     }
@@ -451,7 +916,6 @@ async function submitMessage() {
     const contentType = res.headers.get('content-type') || '';
 
     if (contentType.includes('text/event-stream')) {
-      // ── SSE streaming response ──
       aiGroup  = renderMessage('assistant', '');
       aiBubble = aiGroup._aiBubble;
 
@@ -466,6 +930,7 @@ async function submitMessage() {
           if (!fullText) return;
           aiBubble.innerHTML = window.marked ? marked.parse(fullText) : esc(fullText);
           hlAll(aiBubble);
+          addImageDownloadButtons(aiBubble);
           scrollFeed();
         }, 100);
       };
@@ -504,7 +969,6 @@ async function submitMessage() {
         }
       }
 
-      // Final render after stream ends
       if (aiBubble._rt) {
         clearTimeout(aiBubble._rt);
         aiBubble._rt = null;
@@ -512,16 +976,14 @@ async function submitMessage() {
       if (fullText) {
         aiBubble.innerHTML = window.marked ? marked.parse(fullText) : esc(fullText);
         hlAll(aiBubble);
+        addImageDownloadButtons(aiBubble);
         scrollFeed();
       }
     } else {
-      // ── JSON fallback (non-streaming) ──
       const data = await res.json();
-
       if (data.error) {
         fullText = `⚠️ ${esc(String(data.error))}`;
         renderMessage('assistant', fullText);
-        console.warn('API error:', { type: data.errorType, message: data.error });
       } else {
         fullText = data.content || '';
         aiGroup  = renderMessage('assistant', '');
@@ -529,6 +991,7 @@ async function submitMessage() {
         if (fullText) {
           aiBubble.innerHTML = window.marked ? marked.parse(fullText) : esc(fullText);
           hlAll(aiBubble);
+          addImageDownloadButtons(aiBubble);
           scrollFeed();
         } else {
           aiBubble.innerHTML = '<span style="color:var(--text-muted)">No response generated.</span>';
@@ -612,20 +1075,36 @@ function populateSettingsPanel() {
   if (fLength) fLength.value = s.responseLength || 'medium';
   const fTemp = document.getElementById('fTemp');
   const tempLabel = document.getElementById('tempLabel');
-  if (fTemp) { fTemp.value = s.creativity ?? 1.0; if (tempLabel) tempLabel.textContent = fTemp.value; }
+  if (fTemp) { fTemp.value = s.creativity ?? 2.0; if (tempLabel) tempLabel.textContent = fTemp.value; }
   const fLang = document.getElementById('fLang');
   if (fLang) fLang.value = s.language || 'English';
+  const fModel = document.getElementById('fModel');
+  if (fModel) fModel.value = selectedModel;
 
   refreshMemoryTab();
   updateSidebarUser();
 }
 
-function refreshMemoryTab() {
+function refreshMemoryTab(filter = '') {
   const list  = document.getElementById('memoryList');
   const empty = document.getElementById('memoryEmpty');
+  const stats = document.getElementById('memoryStats');
   if (!list) return;
   list.innerHTML = '';
-  const entries = Object.entries(userMemories);
+  let entries = Object.entries(userMemories);
+
+  // Filter by search
+  if (filter) {
+    const q = filter.toLowerCase();
+    entries = entries.filter(([,m]) => m.text.toLowerCase().includes(q));
+  }
+
+  // Stats
+  if (stats) {
+    const total = Object.keys(userMemories).length;
+    stats.textContent = filter ? `${entries.length} of ${total} memories` : `${total} saved memories`;
+  }
+
   if (entries.length === 0) {
     if (empty) empty.style.display = 'block';
   } else {
@@ -633,16 +1112,44 @@ function refreshMemoryTab() {
     entries.sort(([,a],[,b]) => b.savedAt - a.savedAt).forEach(([id, mem]) => {
       const chip = document.createElement('div');
       chip.className = 'memory-chip';
-      chip.innerHTML = `<span class="memory-chip-text">${esc(mem.text)}</span>
-        <button class="memory-del" title="Delete memory">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-        </button>`;
+      const date = mem.savedAt ? new Date(mem.savedAt).toLocaleDateString() : '';
+      chip.innerHTML = `<div class="memory-chip-content">
+          <span class="memory-chip-text">${esc(mem.text)}</span>
+          <span class="memory-chip-date">${date}</span>
+        </div>
+        <div class="memory-chip-actions">
+          <button class="memory-edit" title="Edit memory">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+          </button>
+          <button class="memory-del" title="Delete memory">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>
+          </button>
+        </div>`;
       chip.querySelector('.memory-del').addEventListener('click', async () => {
         const uid = currentUser.uid;
-        // Delete from THIS user's memory only
         await remove(ref(db, `${memoryPath(uid)}/${id}`));
         delete userMemories[id];
-        refreshMemoryTab();
+        refreshMemoryTab(filter);
+      });
+      chip.querySelector('.memory-edit').addEventListener('click', () => {
+        const textEl = chip.querySelector('.memory-chip-text');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = mem.text;
+        input.className = 'memory-edit-input';
+        textEl.replaceWith(input);
+        input.focus();
+        const save = async () => {
+          const newText = input.value.trim();
+          if (newText && newText !== mem.text) {
+            const uid = currentUser.uid;
+            await update(ref(db, `${memoryPath(uid)}/${id}`), { text: newText });
+            userMemories[id].text = newText;
+          }
+          refreshMemoryTab(filter);
+        };
+        input.addEventListener('blur', save);
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } if (e.key === 'Escape') { refreshMemoryTab(filter); } });
       });
       list.appendChild(chip);
     });
@@ -679,6 +1186,14 @@ function setupEventListeners() {
     t.addEventListener('click', () => switchTab(t.dataset.tab));
   });
 
+  // Memory search
+  const memorySearchInput = document.getElementById('memorySearch');
+  if (memorySearchInput) {
+    memorySearchInput.addEventListener('input', e => {
+      refreshMemoryTab(e.target.value);
+    });
+  }
+
   // Save profile (THIS user only)
   document.getElementById('btnSaveProfile').addEventListener('click', async () => {
     const uid = currentUser.uid;
@@ -694,20 +1209,95 @@ function setupEventListeners() {
     Object.assign(userProfile, updates);
     updateSidebarUser();
     setGreeting();
-    showMemoryToast('Profile saved ✓');
+    showMemoryToast('Profile saved');
   });
+
+  // Image compression helper
+  function compressImage(dataUrl, maxW, maxH, quality) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let w = img.width, h = img.height;
+        if (w > maxW || h > maxH) {
+          const ratio = Math.min(maxW / w, maxH / h);
+          w = Math.round(w * ratio);
+          h = Math.round(h * ratio);
+        }
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  // Profile picture upload
+  const profilePicInput = document.getElementById('profilePicInput');
+  if (profilePicInput) {
+    profilePicInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      if (!file.type.startsWith('image/')) {
+        showMemoryToast('Please select an image file');
+        return;
+      }
+
+      if (file.size > 5 * 1024 * 1024) {
+        showMemoryToast('Image must be less than 5MB');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        const dataUrl = ev.target.result;
+        const uid = currentUser.uid;
+
+        // Compress and resize image to fit profile icon
+        const compressed = await compressImage(dataUrl, 256, 256, 0.8);
+
+        // Update profile photoURL in database
+        await update(ref(db, userPath(uid)), { photoURL: compressed });
+        userProfile.photoURL = compressed;
+
+        // Save to savedPic (overwrite previous profile pic)
+        const picRef = ref(db, `${savedPicPath(uid)}/profilePic`);
+        await set(picRef, {
+          url: compressed,
+          prompt: 'Profile picture upload',
+          model: 'user-upload',
+          createdAt: Date.now(),
+          type: 'profile',
+        });
+
+        // Update UI
+        updateSidebarUser();
+        showMemoryToast('Profile picture updated');
+      };
+      reader.readAsDataURL(file);
+      profilePicInput.value = '';
+    });
+  }
 
   // Save AI prefs (THIS user only)
   document.getElementById('btnSaveAi').addEventListener('click', async () => {
     const uid = currentUser.uid;
+    const newModel = document.getElementById('fModel').value;
     const settings = {
       responseStyle:  document.getElementById('fStyle').value,
       responseLength: document.getElementById('fLength').value,
       creativity:     parseFloat(document.getElementById('fTemp').value),
-      language:       document.getElementById('fLang').value
+      language:       document.getElementById('fLang').value,
+      selectedModel:  newModel,
     };
     await update(ref(db, settingsPath(uid)), settings);
     userProfile.settings = { ...(userProfile.settings || {}), ...settings };
+    selectedModel = newModel;
+    if (modelPicker) modelPicker.value = selectedModel;
     showMemoryToast('Preferences saved ✓');
   });
 
@@ -772,6 +1362,17 @@ function setupEventListeners() {
   document.querySelectorAll('.sugg-pill').forEach(btn => {
     btn.addEventListener('click', () => { prompt.value = btn.dataset.text; resizePrompt(); checkSend(); prompt.focus(); });
   });
+
+  // Model picker
+  if (modelPicker) {
+    modelPicker.value = selectedModel;
+    modelPicker.addEventListener('change', async () => {
+      selectedModel = modelPicker.value;
+      if (currentUser) {
+        await update(ref(db, settingsPath(currentUser.uid)), { selectedModel });
+      }
+    });
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
