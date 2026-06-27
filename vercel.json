@@ -1,17 +1,18 @@
 {
-  "headers": [
-    {
-      "source": "/api/(.*)",
-      "headers": [
-        { "key": "Access-Control-Allow-Origin", "value": "*" },
-        { "key": "Access-Control-Allow-Methods", "value": "POST, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "Content-Type" },
-        { "key": "X-Accel-Buffering", "value": "no" },
-        { "key": "Cache-Control", "value": "no-cache, no-transform" }
-      ]
-    }
+  "version": 2,
+  "outputDirectory": "public",
+  "builds": [
+    { "src": "api/chat.js", "use": "@vercel/node" },
+    { "src": "api/deepseek-chat.js", "use": "@vercel/node" },
+    { "src": "api/gemini-chat.js", "use": "@vercel/node" },
+    { "src": "api/gemini-image.js", "use": "@vercel/node" }
   ],
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
+  "routes": [
+    { "src": "/api/deepseek-chat", "dest": "/api/deepseek-chat.js" },
+    { "src": "/api/gemini-chat", "dest": "/api/gemini-chat.js" },
+    { "src": "/api/gemini-image", "dest": "/api/gemini-image.js" },
+    { "src": "/api/(.*)", "dest": "/api/chat.js" },
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/index.html" }
   ]
 }

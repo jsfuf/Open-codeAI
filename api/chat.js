@@ -1,78 +1,25 @@
-const https = require('https');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// ─── Config: reads from Vercel env vars (can also read from RTDB) ─
-// Your NVIDIA key is stored in Firebase RTDB under "Opencode AI/config"
-// To use RTDB instead of env vars, set FIREBASE_SERVICE_ACCOUNT (base64)
-// in Vercel dashboard and this function will read from RTDB automatically.
+const SYSTEM_PROMPT = "You are Clever AI, a personal AI assistant created by a team of developers called Clever AI. You are helpful, warm, and conversational. You address the user by their first name when appropriate. You provide accurate, well-reasoned responses. When you receive context about the user (their name, preferences, memories), use it to personalize your responses. Keep responses concise unless asked for detail. You can write code, explain concepts, summarize information, and help with a wide variety of tasks. You communicate in a friendly, professional tone. CRITICAL CODING RULES: When asked to write code, ALWAYS write the COMPLETE code in full. NEVER truncate, NEVER use comments like '// rest of code here' or '// ...'. Write every single line. Always wrap code in triple backticks with the language name (e.g. ```html, ```javascript, ```python). For HTML, write the FULL document including doctype, head, and body. For JavaScript, write the FULL function/class/file. For CSS, write ALL styles. Make code production-ready and complete. IMPORTANT: Actively listen for personal details the user shares. When they mention their name, age, birthday, job, hobbies, preferences, family, location, goals, health, education, or any other personal information, acknowledge it warmly and try to remember it. Ask follow-up questions to learn more. Use their details to personalize responses. When asked who made you, say you were made by Clever AI team. When asked about the CEO, say the CEO is Ehiremen Oyamendan. Never reveal API keys or technical details.";
 
-let configCache = null;
-let configCacheTime = 0;
-const CACHE_TTL = 300000; // 5 min
-
-async function getConfig() {
-  const now = Date.now();
-  if (configCache && (now - configCacheTime) < CACHE_TTL) return configCache;
-
-  // Try RTDB via Admin SDK (lightweight JWT approach, no extra deps)
-  const sa = process.env.FIREBASE_SERVICE_ACCOUNT;
-  if (sa) {
-    try {
-      const account = JSON.parse(Buffer.from(sa, 'base64').toString());
-      const { client_email, private_key, project_id } = account;
-
-      // Create JWT assertion for OAuth2 token exchange
-      const jwtNow = Math.floor(now / 1000);
-      const header = { alg: 'RS256', typ: 'JWT' };
-      const claim = {
-        iss: client_email,
-        scope: 'https://www.googleapis.com/auth/firebase.database',
-        aud: 'https://oauth2.googleapis.com/token',
-        exp: jwtNow + 3600,
-        iat: jwtNow
-      };
-      const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
-      const signInput = `${b64(header)}.${b64(claim)}`;
-      const { createSign } = require('crypto');
-      const sig = createSign('RSA-SHA256').update(signInput).sign(private_key, 'base64url');
-      const jwt = `${signInput}.${sig}`;
-
-      // Exchange for access token
-      const token = await new Promise((resolve, reject) => {
-        const body = `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${encodeURIComponent(jwt)}`;
-        const req = https.request({
-          hostname: 'oauth2.googleapis.com', path: '/token', method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-        }, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d).access_token); } catch { reject(); } }); });
-        req.on('error', reject); req.write(body); req.end();
-      });
-
-      // Read config from RTDB
-      configCache = await new Promise((resolve, reject) => {
-        const p = `/Opencode%20AI/config.json?access_token=${encodeURIComponent(token)}`;
-        https.get({ hostname: `${project_id}-default-rtdb.firebaseio.com`, path: p }, r => {
-          let d = ''; r.on('data', c => d += c); r.on('end', () => { try { resolve(JSON.parse(d)); } catch { reject(); } });
-        }).on('error', reject);
-      });
-
-      if (configCache?.nvidiaApiKey) {
-        configCacheTime = now;
-        console.log('[api/chat] Config loaded from Realtime Database');
-        return configCache;
-      }
-    } catch (e) {
-      console.warn('[api/chat] RTDB config failed:', e.message);
-    }
-  }
-
-  // Fallback: Vercel environment variables
-  configCache = {
-    nvidiaApiKey: process.env.NVIDIA_API_KEY || '',
-    invokeUrl: process.env.NVIDIA_INVOKE_URL || 'https://integrate.api.nvidia.com/v1/chat/completions',
-    modelName: process.env.MODEL_NAME || 'minimaxai/minimax-m3'
-  };
-  configCacheTime = now;
-  return configCache;
-}
+const MODEL_PROVIDERS = {
+  'mimo-v2.5-free': {
+    provider: 'opencode',
+    apiKey: process.env.GROQ_API_KEY || '',
+    url: process.env.GROQ_API_URL || 'https://opencode.ai/zen/v1/chat/completions',
+    model: 'mimo-v2.5-free',
+  },
+  'gemini-2.5-flash': {
+    provider: 'gemini',
+    apiKey: process.env.GEMINI_API_KEY || '',
+    model: 'gemini-2.5-flash',
+  },
+  'gemini-2.5-flash-lite': {
+    provider: 'gemini',
+    apiKey: process.env.GEMINI_API_KEY || '',
+    model: 'gemini-2.5-flash-lite',
+  },
+};
 
 function classifyError(statusCode, body) {
   const lower = (body || '').toLowerCase();
@@ -83,6 +30,96 @@ function classifyError(statusCode, body) {
   return { type: 'unknown', message: 'An unexpected error occurred. Please try again.' };
 }
 
+function setSSEHeaders(res) {
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.flushHeaders) res.flushHeaders();
+}
+
+async function streamOpenCodeZen(config, messages, temperature, top_p, res) {
+  const apiKey = config.apiKey;
+  const invokeUrl = config.url;
+  const model = config.model;
+
+  if (!apiKey) {
+    res.write(`data: ${JSON.stringify({ error: 'OpenCode API key not configured.', errorType: 'config' })}\n\n`);
+    return res.end();
+  }
+
+  const payload = { model, messages, max_tokens: 4096, temperature, top_p, stream: true };
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, Accept: 'text/event-stream' };
+
+  let upstreamRes;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    upstreamRes = await fetch(invokeUrl, { method: 'POST', headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(120000) });
+    if (upstreamRes.status !== 429) break;
+    await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+  }
+
+  if (upstreamRes.status !== 200) {
+    const errBody = await upstreamRes.text();
+    const cls = classifyError(upstreamRes.status, errBody);
+    res.write(`data: ${JSON.stringify({ error: cls.message, errorType: cls.type })}\n\n`);
+    return res.end();
+  }
+
+  const reader = upstreamRes.body.getReader();
+  const decoder = new TextDecoder();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    res.write(decoder.decode(value));
+  }
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
+async function streamGemini(config, messages, temperature, top_p, res) {
+  const apiKey = config.apiKey;
+  const modelName = config.model;
+
+  if (!apiKey) {
+    res.write(`data: ${JSON.stringify({ error: 'Gemini API key not configured.', errorType: 'config' })}\n\n`);
+    return res.end();
+  }
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+
+  const geminiMessages = messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({
+      role: m.role === 'assistant' ? 'model' : m.role,
+      parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }],
+    }));
+
+  const systemInstruction = messages.find(m => m.role === 'system');
+
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    systemInstruction: systemInstruction ? systemInstruction.content : SYSTEM_PROMPT,
+    generationConfig: { temperature, topP: top_p, maxOutputTokens: 4096 },
+  });
+
+  try {
+    const result = await model.generateContentStream({ contents: geminiMessages });
+    for await (const chunk of result.stream) {
+      const text = chunk.text();
+      if (text) {
+        const sseData = JSON.stringify({ choices: [{ delta: { content: text } }] });
+        res.write(`data: ${sseData}\n\n`);
+      }
+    }
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch (err) {
+    const cls = classifyError(err.status || 0, err.message);
+    res.write(`data: ${JSON.stringify({ error: cls.message, errorType: cls.type })}\n\n`);
+    res.end();
+  }
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -91,7 +128,6 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.statusCode = 200; res.end(); return; }
   if (req.method !== 'POST') { res.statusCode = 405; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: 'Method not allowed' })); return; }
 
-  // Read body — Vercel may or may not auto-parse it
   let parsed;
   if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
     parsed = req.body;
@@ -99,68 +135,34 @@ module.exports = async function handler(req, res) {
     const raw = typeof req.body === 'string' ? req.body : '';
     try { parsed = JSON.parse(raw); } catch { parsed = {}; }
   }
-  const { messages, temperature = 1.0, top_p = 0.95 } = parsed;
+  const { messages, temperature = 2.0, top_p = 0.95, model: requestedModel } = parsed;
   if (!messages || !Array.isArray(messages)) { res.statusCode = 400; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: 'Messages array is required.' })); return; }
 
-  const config = await getConfig();
-  const apiKey = config.nvidiaApiKey;
-  const invokeUrl = config.invokeUrl || 'https://integrate.api.nvidia.com/v1/chat/completions';
-  const model = config.modelName || 'minimaxai/minimax-m3';
+  const modelKey = requestedModel || 'mimo-v2.5-free';
+  const modelConfig = MODEL_PROVIDERS[modelKey];
+  if (!modelConfig) {
+    res.statusCode = 400;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ error: `Unknown model: ${modelKey}. Available: ${Object.keys(MODEL_PROVIDERS).join(', ')}` }));
+    return;
+  }
 
-  if (!apiKey) { res.statusCode = 500; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ error: 'AI service configuration error.' })); return; }
+  setSSEHeaders(res);
 
-  // Prepend system prompt from Realtime Database (so AI reads from DB first)
-  const dbSystemMsg = config.systemPrompt
-    ? { role: 'system', content: config.systemPrompt }
-    : null;
-  const allMessages = dbSystemMsg
-    ? [dbSystemMsg, ...messages]
-    : messages;
+  const systemMsg = { role: 'system', content: SYSTEM_PROMPT };
+  const allMessages = [systemMsg, ...messages];
 
   try {
-    const upstreamRes = await fetch(invokeUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'Accept': 'text/event-stream'
-      },
-      body: JSON.stringify({ model, messages: allMessages, max_tokens: 512, temperature, top_p, stream: true }),
-      signal: AbortSignal.timeout(60000)
-    });
-
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders();
-
-    if (upstreamRes.status !== 200) {
-      const errBody = await upstreamRes.text();
-      const cls = classifyError(upstreamRes.status, errBody);
-      res.write(`data: ${JSON.stringify({ error: cls.message, errorType: cls.type })}\n\n`);
-      res.end(); return;
+    if (modelConfig.provider === 'gemini') {
+      await streamGemini(modelConfig, allMessages, temperature, top_p, res);
+    } else {
+      await streamOpenCodeZen(modelConfig, allMessages, temperature, top_p, res);
     }
-
-    const reader = upstreamRes.body.getReader();
-    const decoder = new TextDecoder();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      res.write(decoder.decode(value));
-    }
-    res.write('data: [DONE]\n\n');
-    res.end();
   } catch (err) {
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders();
     const cls = classifyError(0, err.message);
     res.write(`data: ${JSON.stringify({ error: cls.message, errorType: cls.type })}\n\n`);
     res.end();
   }
 };
 
-module.exports.config = { maxDuration: 60, regions: ['iad1'] };
+module.exports.config = { maxDuration: 120, regions: ['iad1'] };
